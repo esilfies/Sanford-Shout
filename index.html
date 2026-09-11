@@ -42,7 +42,7 @@
 
   header.masthead{
     text-align:center;
-    padding: 6px 0 30px;
+    padding: 6px 0 6px;
     color: var(--paper);
   }
   .kicker{
@@ -57,7 +57,7 @@
     font-weight: 700;
     font-size: clamp(40px, 9vw, 64px);
     line-height: 0.98;
-    margin: 0 0 14px;
+    margin: 0 0 26px;
     color: var(--paper);
   }
   h1.title em{
@@ -238,6 +238,15 @@
     font-size: 12.5px;
     margin-top: 44px;
   }
+  footer p{ margin: 0 0 6px; }
+  footer p:last-child{ margin-bottom: 0; }
+  footer a{
+    color: var(--gold);
+    text-decoration: underline;
+    text-decoration-color: rgba(213,161,63,0.45);
+    text-underline-offset: 2px;
+  }
+  footer a:hover{ text-decoration-color: var(--gold); }
 
   @media (max-width: 480px){
     .event{ grid-template-columns: 74px 1fr; }
@@ -594,7 +603,10 @@
     </ul>
   </div>
 
-  <footer>Put together with love (and several browser tabs) for the crew. — Eric</footer>
+  <footer>
+    <p>Last updated September 11, 2026</p>
+    <p>Know of an event I should add? Send it my way — <a href="mailto:esilfies13@gmail.com">esilfies13@gmail.com</a></p>
+  </footer>
 
 </div>
 </body>
