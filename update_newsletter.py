@@ -2,30 +2,63 @@
 """
 Daily maintenance script for The Silfies Select newsletter.
 
-What it does, every time it's run:
-1. Looks at every event card (each needs data-start="YYYY-MM-DD" and,
-   for multi-day events, data-end="YYYY-MM-DD").
-2. Any event whose last day is before today gets pulled out of its month
-   section and added as a one-line entry to the "Last Month's Events"
-   list at the bottom.
-3. Any month header left with zero events under it is removed.
-4. The footer's "Last updated" line is stamped with today's date.
+This script makes SURGICAL text edits -- it never parses and rewrites
+the whole document (that approach strips your hand-written indentation).
+Instead it finds exactly the text that needs to change and edits only
+that, leaving every other byte of the file untouched.
 
-Requires: pip install beautifulsoup4 lxml
+What it does, every time it's run:
+1. Finds each event card (needs data-start="YYYY-MM-DD" and, for
+   multi-day events, data-end="YYYY-MM-DD" on its opening <div class="event">
+   tag).
+2. Any event whose last day is before today is cut out of its month
+   section and added as a new line at the TOP of the "Just Missed Out!"
+   list at the bottom (most recently completed event first).
+3. Any month header left with zero events under it is removed.
+4. The footer's "Last updated" line is stamped with today's date,
+   keeping whatever capitalization/punctuation you're already using.
+
 Run against your published HTML file (see the GitHub Actions workflow
 for how this runs automatically every day).
 """
 
+import re
 import sys
 from datetime import date, datetime
 
-from bs4 import BeautifulSoup
-
 HTML_PATH = "index.html"  # change if your file has a different name
+
+# Matches one full event block: from its opening <div class="event" ...>
+# tag through everything up to (but not including) whatever comes next --
+# another event, a month divider, the past-section, or a comment. This
+# works regardless of how many closing </div> tags or optional
+# <p class="note"> lines are inside, because it never tries to count
+# nesting depth -- it just looks for where the NEXT sibling begins.
+EVENT_BLOCK_RE = re.compile(
+    r'<div class="event"'
+    r'(?P<attrs>[^>]*)>'
+    r'(?P<inner>.*?)'
+    r'(?=<div class="event"|<div class="month-divider"|<div class="past-section"|<!--)',
+    re.DOTALL,
+)
+
+MONTH_DIVIDER_RE = re.compile(
+    r'(?:<!--.*?-->\s*)?'  # optional preceding comment banner, e.g. <!-- === SEPTEMBER === -->
+    r'<div class="month-divider"><h2>(\w+)</h2><div class="rule"></div></div>\s*'
+)
+
+NAME_RE = re.compile(r"<h3>(.*?)</h3>")
+VENUE_RE = re.compile(r'<p class="venue">(.*?)</p>')
+DATA_START_RE = re.compile(r'data-start="(\d{4}-\d{2}-\d{2})"')
+DATA_END_RE = re.compile(r'data-end="(\d{4}-\d{2}-\d{2})"')
 
 
 def parse_date(s):
     return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+def strip_tags(s):
+    return re.sub(r"<.*?>", "", s).strip()
 
 
 def format_range(start, end):
@@ -39,77 +72,75 @@ def format_range(start, end):
 
 def main():
     with open(HTML_PATH, "r", encoding="utf-8") as f:
-        soup = BeautifulSoup(f.read(), "lxml")
+        html = f.read()
 
     today = date.today()
-    moved = []  # (start_date, li_tag) so we can sort before inserting
+    new_archive_lines = []  # (start_date, formatted <li> line), oldest first
 
-    events = soup.select("div.event[data-start]")
-    for ev in events:
-        start = parse_date(ev["data-start"])
-        end = parse_date(ev["data-end"]) if ev.has_attr("data-end") else start
+    # --- Pass 1: find and remove past events -------------------------
+    def maybe_strip(m):
+        attrs = m.group("attrs")
+        start_match = DATA_START_RE.search(attrs)
+        if not start_match:
+            return m.group(0)  # no date info -- leave it alone
+
+        start = parse_date(start_match.group(1))
+        end_match = DATA_END_RE.search(attrs)
+        end = parse_date(end_match.group(1)) if end_match else start
 
         if end >= today:
-            continue  # still upcoming -- leave it alone
+            return m.group(0)  # still upcoming
 
-        h3 = ev.select_one("h3")
-        venue = ev.select_one("p.venue")
-        name = h3.get_text(strip=True) if h3 else "Unknown event"
-        venue_text = venue.get_text(strip=True) if venue else ""
+        inner = m.group("inner")
+        name_match = NAME_RE.search(inner)
+        venue_match = VENUE_RE.search(inner)
+        name = strip_tags(name_match.group(1)) if name_match else "Unknown event"
+        venue = strip_tags(venue_match.group(1)) if venue_match else ""
         date_str = format_range(start, end)
 
-        li = soup.new_tag("li")
-        li.string = f"{name} \u2014 {venue_text} "
-        span = soup.new_tag("span")
-        span.string = f"\u00b7 {date_str}"
-        li.append(span)
+        line = f'      <li>{name} \u2014 {venue} <span>\u00b7 {date_str}</span></li>'
+        new_archive_lines.append((start, line))
+        return ""  # delete the whole block
 
-        moved.append((start, li))
-        ev.decompose()  # remove the card entirely
+    html = EVENT_BLOCK_RE.sub(maybe_strip, html)
 
-    # Drop any month-divider with no events left under it
-    for divider in soup.select("div.month-divider"):
-        sib = divider.find_next_sibling()
-        has_event = False
-        while sib is not None:
-            classes = sib.get("class", [])
-            if "month-divider" in classes or "past-section" in classes:
-                break
-            if "event" in classes:
-                has_event = True
-                break
-            sib = sib.find_next_sibling()
-        if not has_event:
-            divider.decompose()
+    # --- Pass 2: drop any month-divider with nothing left under it ---
+    def maybe_strip_divider(m):
+        after = html[m.end():]
+        next_event = after.find('<div class="event"')
+        next_divider = after.find('<div class="month-divider"')
+        next_past = after.find('<div class="past-section"')
+        boundary = min(x for x in (next_event, next_divider, next_past) if x != -1)
+        if next_event != -1 and next_event == boundary:
+            return m.group(0)  # has at least one event -- keep it
+        return ""  # nothing follows before the next divider/section -- drop it
 
-    # Insert newly-past events into the Just Missed Out! list, newest first
-    # (they go at the top so the most recently completed event is always
-    # in the top-left position, since the list uses a 2-column CSS layout
-    # that fills top-to-bottom, left column first).
-    if moved:
-        moved.sort(key=lambda pair: pair[0])  # oldest first...
-        ul = soup.select_one("div.past-section ul")
-        if ul is not None:
-            for _, li in moved:
-                ul.insert(0, li)  # ...each inserted at position 0, so by
-                                   # the time the loop finishes, the newest
-                                   # of this batch ends up on top overall.
-        else:
-            print("WARNING: couldn't find div.past-section ul -- events "
-                  "were removed from their month but not archived.", file=sys.stderr)
+    html = MONTH_DIVIDER_RE.sub(maybe_strip_divider, html)
 
-    # Stamp today's date in the footer (tolerant of "Last updated" /
-    # "Last Updated:" / extra whitespace, etc.)
-    footer_p = soup.select_one("footer p")
-    if footer_p and footer_p.get_text(strip=True).lower().startswith("last updated"):
-        # Preserve whatever the existing line used for "Last updated" vs
-        # "Last Updated:" isn't worth guessing -- just standardize it.
-        footer_p.string = f"Last updated: {today.strftime('%B %-d, %Y')}"
+    # --- Pass 3: insert newly-past events at the TOP of the archive --
+    if new_archive_lines:
+        new_archive_lines.sort(key=lambda pair: pair[0], reverse=True)  # newest first
+        insertion = "\n".join(line for _, line in new_archive_lines)
+        html = re.sub(
+            r'(<div class="past-section">\s*<h2>[^<]*</h2>\s*<ul>\s*\n)',
+            r"\1" + insertion.replace("\\", "\\\\") + "\n",
+            html,
+            count=1,
+        )
+
+    # --- Pass 4: stamp today's date in the footer ---------------------
+    html = re.sub(
+        r"(Last [Uu]pdated:?\s*)[A-Za-z]+ \d{1,2}, \d{4}",
+        lambda m: m.group(1) + today.strftime("%B %-d, %Y"),
+        html,
+        count=1,
+    )
 
     with open(HTML_PATH, "w", encoding="utf-8") as f:
-        f.write(str(soup))
+        f.write(html)
 
-    print(f"Pruned {len(moved)} past event(s). Footer stamped {today.isoformat()}.")
+    print(f"Pruned {len(new_archive_lines)} past event(s). "
+          f"Footer stamped {today.isoformat()}.")
 
 
 if __name__ == "__main__":
