@@ -82,13 +82,18 @@ def main():
         if not has_event:
             divider.decompose()
 
-    # Insert newly-past events into the Last Month's Events list, oldest first
+    # Insert newly-past events into the Just Missed Out! list, newest first
+    # (they go at the top so the most recently completed event is always
+    # in the top-left position, since the list uses a 2-column CSS layout
+    # that fills top-to-bottom, left column first).
     if moved:
-        moved.sort(key=lambda pair: pair[0])
+        moved.sort(key=lambda pair: pair[0])  # oldest first...
         ul = soup.select_one("div.past-section ul")
         if ul is not None:
             for _, li in moved:
-                ul.append(li)
+                ul.insert(0, li)  # ...each inserted at position 0, so by
+                                   # the time the loop finishes, the newest
+                                   # of this batch ends up on top overall.
         else:
             print("WARNING: couldn't find div.past-section ul -- events "
                   "were removed from their month but not archived.", file=sys.stderr)
